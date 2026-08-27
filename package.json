@@ -16,7 +16,7 @@
     "qrcode": "^1.5.4"
   },
   "optionalDependencies": {
-    "@openai/codex-sdk": "^0.110.0"
+    "@openai/codex-sdk": "0.147.0"
   },
   "devDependencies": {
     "@types/node": "^22",

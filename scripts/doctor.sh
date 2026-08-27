@@ -233,7 +233,20 @@ if [ "$CTI_RUNTIME" = "codex" ] || [ "$CTI_RUNTIME" = "auto" ]; then
   # Check @openai/codex-sdk
   CODEX_SDK="$SKILL_DIR/node_modules/@openai/codex-sdk"
   if [ -d "$CODEX_SDK" ]; then
-    check "@openai/codex-sdk installed" 0
+    CODEX_SDK_VER=$(node -e "try { process.stdout.write(require('$CODEX_SDK/package.json').version || '') } catch {}" 2>/dev/null || true)
+    check "@openai/codex-sdk installed (${CODEX_SDK_VER:-unknown})" 0
+
+    # The TypeScript SDK ships a pinned Codex CLI runtime. Mixing a substantially
+    # older SDK runtime with a newer interactive CLI can make resumed thread
+    # history behave differently even though both write to ~/.codex/sessions.
+    if command -v codex &>/dev/null && [ -n "$CODEX_SDK_VER" ]; then
+      CODEX_CLI_SEMVER=$(echo "$CODEX_VER" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+      if [ -n "$CODEX_CLI_SEMVER" ] && [ "$CODEX_CLI_SEMVER" = "$CODEX_SDK_VER" ]; then
+        check "Codex CLI and SDK runtime versions match (${CODEX_CLI_SEMVER})" 0
+      elif [ -n "$CODEX_CLI_SEMVER" ]; then
+        check "Codex CLI (${CODEX_CLI_SEMVER}) and SDK runtime (${CODEX_SDK_VER}) versions match" 1
+      fi
+    fi
   else
     if [ "$CTI_RUNTIME" = "codex" ]; then
       check "@openai/codex-sdk installed (not found — run 'npm install' in $SKILL_DIR)" 1
@@ -248,7 +261,7 @@ if [ "$CTI_RUNTIME" = "codex" ] || [ "$CTI_RUNTIME" = "auto" ]; then
   if [ -n "${CTI_CODEX_API_KEY:-}" ] || [ -n "${CODEX_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ]; then
     CODEX_AUTH=0
   elif command -v codex &>/dev/null; then
-    CODEX_AUTH_OUT=$(codex auth status 2>&1 || true)
+    CODEX_AUTH_OUT=$(codex login status 2>&1 || codex auth status 2>&1 || true)
     if echo "$CODEX_AUTH_OUT" | grep -qiE 'logged.in|authenticated'; then
       CODEX_AUTH=0
     fi
@@ -286,7 +299,10 @@ fi
 
 # --- config.env permissions ---
 if [ -f "$CONFIG_FILE" ]; then
-  PERMS=$(stat -f "%Lp" "$CONFIG_FILE" 2>/dev/null || stat -c "%a" "$CONFIG_FILE" 2>/dev/null || echo "unknown")
+  case "$(uname -s)" in
+    Darwin) PERMS=$(stat -f "%Lp" "$CONFIG_FILE" 2>/dev/null || echo "unknown") ;;
+    *) PERMS=$(stat -c "%a" "$CONFIG_FILE" 2>/dev/null || echo "unknown") ;;
+  esac
   if [ "$PERMS" = "600" ]; then
     check "config.env permissions are 600" 0
   else
