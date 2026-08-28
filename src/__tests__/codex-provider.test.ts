@@ -419,7 +419,7 @@ describe('CodexProvider', () => {
     }
   });
 
-  it('retries with fresh thread when resume fails before any events', async () => {
+  it('reports an error and never starts a fresh thread when resume fails before any events', async () => {
     const { CodexProvider } = await import('../codex-provider.js');
     const { PendingPermissions } = await import('../permission-gateway.js');
     const provider = new CodexProvider(new PendingPermissions());
@@ -431,14 +431,6 @@ describe('CodexProvider', () => {
         throw new Error('resuming session with different model');
       },
     };
-    const freshThread = {
-      runStreamed: () => ({
-        events: (async function* () {
-          yield { type: 'turn.completed', usage: { input_tokens: 2, output_tokens: 3, cached_input_tokens: 0 } };
-        })(),
-      }),
-    };
-
     (provider as any).sdk = { Codex: class { constructor() {} } };
     (provider as any).codex = {
       resumeThread: () => {
@@ -447,7 +439,7 @@ describe('CodexProvider', () => {
       },
       startThread: () => {
         startCalls += 1;
-        return freshThread;
+        throw new Error('must not start a fresh thread');
       },
     };
 
@@ -461,12 +453,45 @@ describe('CodexProvider', () => {
     const chunks = await collectStream(stream);
     const events = parseSSEChunks(chunks);
     const errorEvent = events.find(e => e.type === 'error');
-    const resultEvent = events.find(e => e.type === 'result');
 
     assert.equal(resumeCalls, 1, 'Should attempt resume once');
-    assert.equal(startCalls, 1, 'Should fall back to a fresh thread');
-    assert.ok(!errorEvent, 'Retry success should not emit error');
-    assert.ok(resultEvent, 'Retry success should emit result');
+    assert.equal(startCalls, 0, 'Should not fall back to a fresh thread');
+    assert.match(String(errorEvent?.data), /Failed to resume Codex session codex-old-thread-id/);
+  });
+
+  it('rejects a resumed thread whose started ID differs from the requested ID', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    let startCalls = 0;
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      resumeThread: () => ({
+        runStreamed: () => ({
+          events: (async function* () {
+            yield { type: 'thread.started', thread_id: 'unexpected-new-thread' };
+          })(),
+        }),
+      }),
+      startThread: () => {
+        startCalls += 1;
+        throw new Error('must not start a fresh thread');
+      },
+    };
+
+    const chunks = await collectStream(provider.streamChat({
+      prompt: 'strict resume test',
+      sessionId: 'strict-resume-session',
+      sdkSessionId: 'requested-thread',
+    }));
+    const events = parseSSEChunks(chunks);
+    const errorEvent = events.find(e => e.type === 'error');
+    const statusEvent = events.find(e => e.type === 'status');
+
+    assert.equal(startCalls, 0);
+    assert.equal(statusEvent, undefined, 'Should not publish the unexpected thread ID');
+    assert.match(String(errorEvent?.data), /requested requested-thread, received unexpected-new-thread/);
   });
 });
 

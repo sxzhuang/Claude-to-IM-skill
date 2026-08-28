@@ -60,15 +60,6 @@ function shouldSkipGitRepoCheck(): boolean {
   return process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK === 'true';
 }
 
-function shouldRetryFreshThread(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes('resuming session with different model') ||
-    lower.includes('no such session') ||
-    (lower.includes('resume') && lower.includes('session'))
-  );
-}
-
 export class CodexProvider implements LLMProvider {
   private sdk: CodexModule | null = null;
   private codex: CodexInstance | null = null;
@@ -123,7 +114,7 @@ export class CodexProvider implements LLMProvider {
 
             // Resolve or create thread
             const inMemoryThreadId = self.threadIds.get(params.sessionId);
-            let savedThreadId = inMemoryThreadId || params.sdkSessionId || undefined;
+            const savedThreadId = inMemoryThreadId || params.sdkSessionId || undefined;
 
             const approvalPolicy = toApprovalPolicy(params.permissionMode);
             const passModel = shouldPassModelToCodex();
@@ -159,33 +150,34 @@ export class CodexProvider implements LLMProvider {
               input = params.prompt;
             }
 
-            let retryFresh = false;
-
-            while (true) {
-              let thread: ThreadInstance;
-              if (savedThreadId) {
-                try {
-                  thread = codex.resumeThread(savedThreadId, threadOptions);
-                } catch {
-                  thread = codex.startThread(threadOptions);
-                }
-              } else {
-                thread = codex.startThread(threadOptions);
-              }
-
-              let sawAnyEvent = false;
+            let thread: ThreadInstance;
+            if (savedThreadId) {
               try {
-                const { events } = await thread.runStreamed(input);
+                thread = codex.resumeThread(savedThreadId, threadOptions);
+              } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                throw new Error(`Failed to resume Codex session ${savedThreadId}: ${message}`);
+              }
+            } else {
+              thread = codex.startThread(threadOptions);
+            }
 
-                for await (const event of events) {
-                  sawAnyEvent = true;
-                  if (params.abortController?.signal.aborted) {
-                    break;
-                  }
+            try {
+              const { events } = await thread.runStreamed(input);
 
-                  switch (event.type) {
+              for await (const event of events) {
+                if (params.abortController?.signal.aborted) {
+                  break;
+                }
+
+                switch (event.type) {
                     case 'thread.started': {
                       const threadId = event.thread_id as string;
+                      if (savedThreadId && threadId !== savedThreadId) {
+                        throw new Error(
+                          `Codex resumed an unexpected session: requested ${savedThreadId}, received ${threadId}`
+                        );
+                      }
                       self.threadIds.set(params.sessionId, threadId);
 
                       controller.enqueue(sseEvent('status', {
@@ -228,19 +220,17 @@ export class CodexProvider implements LLMProvider {
                     }
 
                     // item.started, item.updated, turn.started — no action needed
-                  }
                 }
-                break;
-              } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                if (savedThreadId && !retryFresh && !sawAnyEvent && shouldRetryFreshThread(message)) {
-                  console.warn('[codex-provider] Resume failed, retrying with a fresh thread:', message);
-                  savedThreadId = undefined;
-                  retryFresh = true;
-                  continue;
-                }
-                throw err;
               }
+            } catch (err) {
+              if (savedThreadId) {
+                const message = err instanceof Error ? err.message : String(err);
+                if (message.startsWith('Codex resumed an unexpected session:')) {
+                  throw err;
+                }
+                throw new Error(`Failed to resume Codex session ${savedThreadId}: ${message}`);
+              }
+              throw err;
             }
 
             controller.close();
