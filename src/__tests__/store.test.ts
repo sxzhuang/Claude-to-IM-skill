@@ -72,6 +72,42 @@ describe('JsonFileStore', () => {
     assert.equal(b2.codepilotSessionId, 'sess-2');
   });
 
+  it('preserves sdkSessionId when creating a channel binding for the first time', () => {
+    const store = new JsonFileStore(makeSettings());
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'new-chat',
+      codepilotSessionId: 'bridge-session',
+      sdkSessionId: 'codex-session-123',
+      workingDirectory: '/tmp',
+      model: '',
+    });
+
+    assert.equal(binding.sdkSessionId, 'codex-session-123');
+    assert.equal(
+      store.getChannelBinding('feishu', 'new-chat')?.sdkSessionId,
+      'codex-session-123',
+    );
+  });
+
+  it('keeps sdkSessionId when only the working directory changes', () => {
+    const store = new JsonFileStore(makeSettings());
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'new-chat',
+      codepilotSessionId: 'bridge-session',
+      sdkSessionId: 'codex-session-123',
+      workingDirectory: '/tmp',
+      model: '',
+    });
+
+    store.updateChannelBinding(binding.id, { workingDirectory: '/tmp/other' });
+
+    const updated = store.getChannelBinding('feishu', 'new-chat');
+    assert.equal(updated?.workingDirectory, '/tmp/other');
+    assert.equal(updated?.sdkSessionId, 'codex-session-123');
+  });
+
   it('upsertChannelBinding clears sdkSessionId when explicitly set to empty string', () => {
     const store = new JsonFileStore(makeSettings());
     const b1 = store.upsertChannelBinding({

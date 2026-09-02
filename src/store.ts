@@ -233,7 +233,7 @@ export class JsonFileStore implements BridgeStore {
       channelType: data.channelType,
       chatId: data.chatId,
       codepilotSessionId: data.codepilotSessionId,
-      sdkSessionId: '',
+      sdkSessionId: data.sdkSessionId ?? '',
       workingDirectory: data.workingDirectory,
       model: data.model,
       mode: (this.settings.get('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
