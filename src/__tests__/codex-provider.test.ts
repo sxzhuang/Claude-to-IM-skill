@@ -379,6 +379,41 @@ describe('CodexProvider', () => {
     }
   });
 
+  it('passes an explicit session model and reasoning effort when resuming', async () => {
+    const { CodexProvider } = await import('../codex-provider.js');
+    const { PendingPermissions } = await import('../permission-gateway.js');
+    const provider = new CodexProvider(new PendingPermissions());
+
+    let capturedResumeOptions: Record<string, unknown> | undefined;
+    const mockThread = {
+      runStreamed: () => ({
+        events: (async function* () {
+          yield { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 } };
+        })(),
+      }),
+    };
+    (provider as any).sdk = { Codex: class { constructor() {} } };
+    (provider as any).codex = {
+      resumeThread: (_threadId: string, opts: Record<string, unknown>) => {
+        capturedResumeOptions = opts;
+        return mockThread;
+      },
+    };
+
+    const stream = provider.streamChat({
+      prompt: 'hello',
+      sessionId: 'explicit-model-session',
+      sdkSessionId: 'codex-thread-id',
+      model: 'gpt-5.6-sol',
+      modelOverride: true,
+      reasoningEffort: 'medium',
+    });
+    await collectStream(stream);
+
+    assert.equal(capturedResumeOptions?.model, 'gpt-5.6-sol');
+    assert.equal(capturedResumeOptions?.modelReasoningEffort, 'medium');
+  });
+
   it('passes skipGitRepoCheck only when CTI_CODEX_SKIP_GIT_REPO_CHECK=true', async () => {
     const old = process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK;
     process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK = 'true';

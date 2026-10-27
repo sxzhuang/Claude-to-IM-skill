@@ -13,6 +13,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import readline from 'node:readline';
+import { createRequire as createCodexRequire } from 'node:module';
 
 import type { LLMProvider, StreamChatParams } from 'claude-to-im/src/lib/bridge/host.js';
 import type { PendingPermissions } from './permission-gateway.js';
@@ -60,6 +63,25 @@ function shouldSkipGitRepoCheck(): boolean {
   return process.env.CTI_CODEX_SKIP_GIT_REPO_CHECK === 'true';
 }
 
+/** Build the environment inherited by Codex without proxying the IM bridge itself. */
+function codexProcessEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  const proxyUrl = process.env.CTI_CODEX_PROXY_URL;
+  if (!proxyUrl) return env;
+
+  env.HTTP_PROXY = proxyUrl;
+  env.HTTPS_PROXY = proxyUrl;
+  env.ALL_PROXY = proxyUrl;
+  env.http_proxy = proxyUrl;
+  env.https_proxy = proxyUrl;
+  env.all_proxy = proxyUrl;
+
+  const noProxy = process.env.CTI_CODEX_NO_PROXY || 'localhost,127.0.0.1';
+  env.NO_PROXY = noProxy;
+  env.no_proxy = noProxy;
+  return env;
+}
+
 export class CodexProvider implements LLMProvider {
   private sdk: CodexModule | null = null;
   private codex: CodexInstance | null = null;
@@ -68,6 +90,87 @@ export class CodexProvider implements LLMProvider {
   private threadIds = new Map<string, string>();
 
   constructor(private pendingPerms: PendingPermissions) {}
+
+  /** Read Codex's latest context-window usage for the status command. */
+  async getContextStatus(params: { sessionId: string; sdkSessionId?: string }): Promise<{
+    contextLeftPercent: number;
+    tokensUsed: number;
+    modelContextWindow: number;
+  } | null> {
+    const threadId = params.sdkSessionId;
+    if (!threadId) return null;
+    let executable = process.env.CTI_CODEX_EXECUTABLE;
+    let executableArgs: string[] = ['app-server', '--stdio'];
+    if (!executable) {
+      try {
+        executable = process.execPath;
+        executableArgs = [createCodexRequire(import.meta.url)('@openai/codex/bin/codex.js'), ...executableArgs];
+      } catch {
+        executable = 'codex';
+      }
+    }
+    const child = spawn(executable, executableArgs, { stdio: ['pipe', 'pipe', 'pipe'], env: codexProcessEnv() });
+
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      let initialized = false;
+      let responseReceived = false;
+      let usage: { tokensUsed: number; modelContextWindow: number } | null = null;
+      let stderr = '';
+      let timeout: NodeJS.Timeout;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        try { child.kill('SIGTERM'); } catch { /* best effort */ }
+        if (error) reject(error);
+        else if (!usage) resolve(null);
+        else resolve({ ...usage, contextLeftPercent: Math.max(0, Math.min(100, (1 - usage.tokensUsed / usage.modelContextWindow) * 100)) });
+      };
+      const maybeFinish = () => { if (responseReceived && usage) finish(); };
+      timeout = setTimeout(() => finish(new Error('Codex context status timed out after 30 seconds')), 30_000);
+      const send = (message: Record<string, unknown>) => child.stdin.write(`${JSON.stringify(message)}\n`);
+      const lines = readline.createInterface({ input: child.stdout });
+      lines.on('line', (line) => {
+        if (settled || !line.trim()) return;
+        let message: Record<string, unknown>;
+        try { message = JSON.parse(line) as Record<string, unknown>; } catch { return; }
+        if (message.id === 1 && !initialized) {
+          initialized = true;
+          send({ method: 'initialized', params: {} });
+          send({ id: 2, method: 'thread/resume', params: { threadId } });
+        } else if (message.id === 2) {
+          if (message.error) {
+            const error = message.error as { message?: string };
+            finish(new Error(error.message || 'Codex context status request failed'));
+          } else {
+            responseReceived = true;
+            maybeFinish();
+          }
+        } else if (message.method === 'thread/tokenUsage/updated') {
+          const tokenUsage = (message.params as { tokenUsage?: { last?: { totalTokens?: number }; modelContextWindow?: number | null } } | undefined)?.tokenUsage;
+          const tokensUsed = tokenUsage?.last?.totalTokens;
+          const modelContextWindow = tokenUsage?.modelContextWindow;
+          if (typeof tokensUsed === 'number' && typeof modelContextWindow === 'number' && modelContextWindow > 0) {
+            usage = { tokensUsed, modelContextWindow };
+            maybeFinish();
+          }
+        }
+      });
+      child.stderr.on('data', (chunk: Buffer | string) => { stderr = (stderr + chunk.toString()).slice(-4096); });
+      child.once('error', (error) => finish(error));
+      child.once('close', (code) => {
+        if (!settled) {
+          const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
+          finish(new Error(`Codex app-server exited with code ${code ?? 'unknown'}${detail}`));
+        }
+      });
+      send({ id: 1, method: 'initialize', params: {
+        clientInfo: { name: 'claude-to-im', title: 'Claude-to-IM', version: '0.1.0' },
+        capabilities: { experimentalApi: true },
+      } });
+    });
+  }
 
   /**
    * Lazily load the Codex SDK. Throws a clear error if not installed.
@@ -95,6 +198,7 @@ export class CodexProvider implements LLMProvider {
 
     const CodexClass = this.sdk.Codex;
     this.codex = new CodexClass({
+      env: codexProcessEnv(),
       ...(apiKey ? { apiKey } : {}),
       ...(baseUrl ? { baseUrl } : {}),
     });
@@ -120,7 +224,8 @@ export class CodexProvider implements LLMProvider {
             const passModel = shouldPassModelToCodex();
 
             const threadOptions: Record<string, unknown> = {
-              ...(passModel && params.model ? { model: params.model } : {}),
+              ...((passModel || params.modelOverride) && params.model ? { model: params.model } : {}),
+              ...(params.reasoningEffort ? { modelReasoningEffort: params.reasoningEffort } : {}),
               ...(params.workingDirectory ? { workingDirectory: params.workingDirectory } : {}),
               ...(shouldSkipGitRepoCheck() ? { skipGitRepoCheck: true } : {}),
               approvalPolicy,

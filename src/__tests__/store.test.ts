@@ -108,6 +108,34 @@ describe('JsonFileStore', () => {
     assert.equal(updated?.sdkSessionId, 'codex-session-123');
   });
 
+  it('persists per-session model and reasoning overrides', () => {
+    const store = new JsonFileStore(makeSettings());
+    const session = store.createSession('test', '', undefined, '/tmp');
+    const binding = store.upsertChannelBinding({
+      channelType: 'feishu',
+      chatId: 'model-chat',
+      codepilotSessionId: session.id,
+      workingDirectory: '/tmp',
+      model: '',
+    });
+
+    store.updateChannelBinding(binding.id, {
+      model: 'gpt-5.6-sol',
+      modelOverride: true,
+      reasoningEffort: 'medium',
+    });
+    store.updateSessionModel(session.id, 'gpt-5.6-sol', 'medium', true);
+
+    const updatedBinding = store.getChannelBinding('feishu', 'model-chat');
+    const updatedSession = store.getSession(session.id);
+    assert.equal(updatedBinding?.model, 'gpt-5.6-sol');
+    assert.equal(updatedBinding?.modelOverride, true);
+    assert.equal(updatedBinding?.reasoningEffort, 'medium');
+    assert.equal(updatedSession?.model, 'gpt-5.6-sol');
+    assert.equal(updatedSession?.modelOverride, true);
+    assert.equal(updatedSession?.reasoningEffort, 'medium');
+  });
+
   it('upsertChannelBinding clears sdkSessionId when explicitly set to empty string', () => {
     const store = new JsonFileStore(makeSettings());
     const b1 = store.upsertChannelBinding({

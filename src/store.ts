@@ -222,6 +222,8 @@ export class JsonFileStore implements BridgeStore {
         sdkSessionId,
         workingDirectory: data.workingDirectory,
         model: data.model,
+        modelOverride: data.modelOverride ?? (sessionChanged ? false : existing.modelOverride),
+        reasoningEffort: data.reasoningEffort ?? (sessionChanged ? '' : existing.reasoningEffort),
         updatedAt: now(),
       };
       this.bindings.set(key, updated);
@@ -236,6 +238,8 @@ export class JsonFileStore implements BridgeStore {
       sdkSessionId: data.sdkSessionId ?? '',
       workingDirectory: data.workingDirectory,
       model: data.model,
+      modelOverride: data.modelOverride ?? false,
+      reasoningEffort: data.reasoningEffort ?? '',
       mode: (this.settings.get('bridge_default_mode') as 'code' | 'plan' | 'ask') || 'code',
       active: true,
       createdAt: now(),
@@ -362,10 +366,17 @@ export class JsonFileStore implements BridgeStore {
     this.persistBindings();
   }
 
-  updateSessionModel(sessionId: string, model: string): void {
+  updateSessionModel(
+    sessionId: string,
+    model: string,
+    reasoningEffort: ChannelBinding['reasoningEffort'] = '',
+    modelOverride = false,
+  ): void {
     const s = this.sessions.get(sessionId);
     if (s) {
       s.model = model;
+      s.reasoningEffort = reasoningEffort;
+      s.modelOverride = modelOverride;
       this.persistSessions();
     }
   }
